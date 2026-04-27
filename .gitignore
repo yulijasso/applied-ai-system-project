@@ -3,3 +3,7 @@ __pycache__/
 .venv_new/
 .pytest_cache/
 .DS_Store
+.env
+pawpal.log
+knowledge/.embeddings_cache.json
+knowledge/.chroma/

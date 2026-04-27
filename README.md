@@ -1,78 +1,295 @@
-# PawPal+ (Module 2 Project)
+# PawPal+ 
 
-**PawPal+** is a Streamlit app that helps a pet owner plan daily care tasks for their pets. It generates smart, prioritized schedules while detecting conflicts and handling recurring tasks automatically.
+> **PawPal** (Module 2 project): a Streamlit app that helps a pet owner plan daily care tasks for one or more pets. It uses plain Python classes (`Owner` / `Pet` / `Task` / `Scheduler`) to generate a daily plan within a configurable time budget, detect overlapping or conflicting tasks, and handle daily/weekly recurrence. Entirely rule-based — no AI in the original scope.
 
-## Demo
 
-![PawPal App](pawpal_demo.jpeg)
 
-## Features
+## Title and summary
 
-- **Time-based sorting** — Tasks with a scheduled time (e.g., 07:00) are placed first in chronological order. Unscheduled tasks follow, sorted by priority (HIGH > MEDIUM > LOW) then duration (shorter first). Uses `sorted()` with a lambda key.
-- **Filtering by pet or status** — View tasks for a specific pet, only incomplete tasks, only completed tasks, or any combination. Available in both the CLI demo and the Streamlit UI via dropdown selectors.
-- **Daily and weekly recurrence** — Mark a task as `"daily"` or `"weekly"`. When completed, a new instance is automatically created with the next due date calculated using Python's `timedelta` (+1 day or +7 days). Future-dated tasks stay hidden until their day arrives.
-- **Conflict detection** — The scheduler checks every pair of scheduled tasks for overlapping time windows and labels each as:
-  - `SAME-PET` — Two tasks for the same pet overlap (physically impossible)
-  - `CROSS-PET` — Tasks for different pets overlap (may need coordination)
-  
-  Warnings are displayed prominently in the UI without crashing the program.
-- **Greedy time-budget scheduling** — The scheduler fills available minutes by fitting as many tasks as possible, prioritizing high-priority and shorter tasks first. Tasks that don't fit are listed as "skipped."
-- **Task completion with recurrence feedback** — When a recurring task is marked done in the UI, the owner sees a confirmation and the next occurrence date.
+**PawPal+** keeps the original rule-based scheduler and adds an **AI care advisor** that reviews the day's plan against a curated pet-care knowledge base (vetted snippets from AKC, VCA, and AAHA), then returns **structured edits** the scheduler applies before showing the plan to the owner. The result is a single RAG-informed daily schedule with snippet citations.
 
-## Getting started
+It matters because a knowledgeable owner would catch health-relevant scheduling issues (e.g., a 70-minute walk for a brachycephalic Bulldog, walking a senior dog on hot pavement at noon, feeding immediately before exercise for a deep-chested breed) that the rule-based scheduler can't see. PawPal+ surfaces those issues with citations and proposes concrete fixes — and a code-level safety layer rejects any AI suggestion that would silently mutilate the plan.
 
-### Setup
+## Architecture overview
+
+See [`system_diagram.md`](system_diagram.md) for the full diagram. Five-step pipeline that runs every time the owner clicks **Generate schedule**:
+
+1. **Scheduler** (rule-based) builds a draft daily plan from the owner's tasks within their time budget.
+2. **Retriever** runs a per-pet vector search against a persistent **ChromaDB** collection that holds the embedded pet-care knowledge files.
+3. **Agent** (Gemini 2.5-flash) reviews the draft against the retrieved snippets and returns structured `issues` + `proposed_changes`.
+4. **Evaluator** (rule-based) validates each proposed edit against three guards — *valid task_index*, *no fake-split workaround*, *not a no-op* — and applies only the safe ones.
+5. **UI** (Streamlit) shows the final RAG-informed plan with 🤖 badges on AI-edited tasks, an edits diff, and source citations.
+
+ChromaDB sits on the side: the knowledge files (`knowledge/*.md`) are embedded once with `gemini-embedding-001` and persisted to `knowledge/.chroma/`. Subsequent runs reuse the stored vectors and only re-embed snippets whose SHA1 content hash changed.
+
+The owner reviews the plan and optionally clicks **Save AI edits** to persist the changes back to the underlying task list. Without that click, AI edits modify the displayed plan but never the saved data.
+
+## Setup instructions
 
 ```bash
+# 1. Clone and enter the repo
+git clone https://github.com/<you>/applied-ai-system-project.git
+cd applied-ai-system-project
+
+# 2. Create and activate a virtual environment
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+source .venv/bin/activate           # Windows: .venv\Scripts\activate
+
+# 3. Install dependencies
 pip install -r requirements.txt
+
+# 4. Configure API keys
+cp .env.example .env
+# Then edit .env:
+#   GEMINI_API_KEY=...    (required — used for RAG embeddings)
+#   GROQ_API_KEY=...      (optional — fallback for the chat call)
 ```
 
-### Run the app
+A free Gemini API key is required (https://aistudio.google.com/apikey) because the RAG embeddings are computed by `gemini-embedding-001`. The chat call defaults to `gemini-2.5-flash`. If you set `GROQ_API_KEY` (free key at https://console.groq.com/keys), the chat call routes to Groq's Llama models — useful when Gemini's free-tier daily quota is exhausted — while embeddings still use Gemini.
 
 ```bash
+# 5. Run the Streamlit app
 streamlit run app.py
-```
 
-### Run the CLI demo
-
-```bash
+# Or run the CLI demo
 python main.py
+
+# Run the test suite
+python -m pytest tests/ -v
 ```
 
-## Architecture
+The first run embeds the 12 knowledge snippets and persists them to `knowledge/.chroma/`. Subsequent runs reuse the cached embeddings.
 
-The system is built from five classes in `pawpal_system.py`:
 
-| Class | Responsibility |
-|-------|---------------|
-| `Priority` | IntEnum defining HIGH (1), MEDIUM (2), LOW (3) |
-| `Task` | A single care activity with duration, priority, scheduled time, recurrence, and due date |
-| `Pet` | A pet with a name, species, and a list of tasks |
-| `Owner` | The pet owner with available time and a list of pets |
-| `Scheduler` | Generates daily plans, sorts by time, filters tasks, and detects conflicts |
+## Sample interactions
 
-See `uml_diagram.md` for the full Mermaid class diagram, or `uml_final.png` for the rendered image.
+Each example shows the owner's input → what the rule-based scheduler produced → what the advisor said → what was applied.
 
-## Testing PawPal+
+### 1. End-to-end walkthrough — Toy Poodle with an in-range plan (live capture)
 
-Run the full test suite with:
+**Owner setup**
+- Owner name: **Yuliana**
+- Available time per day: **120 min**
 
-```bash
-python -m pytest tests/test_pawpal.py -v
+**Pet setup**
+- Name: **Mochi** · Species: **dog** · Breed: **Toy Poodle** · Age: **1 year**
+
+**Task added**
+- Title: **Morning walk** · Duration: **20 min** · Priority: **HIGH** · Category: **walk** · Recurrence: none
+
+**After clicking _Generate schedule_:**
+
+> Ready to schedule **1** open task(s) across **1** pet(s), within **120 min** today.
+>
+> ✅ **Connected — Gemini · 12-doc knowledge base**
+>
+> **Daily plan for Yuliana — 20/120 min used**
+>
+> | # | Time | Task | Pet | Min | Priority | Recurrence |
+> |---|------|------|-----|-----|----------|------------|
+> | 1 | — | Morning walk | Mochi | 20 | HIGH | — |
+
+**🤖 AI care advisor**
+
+> The plan provides adequate exercise for Mochi, a 1-year-old Toy Poodle, with a 20-minute walk, which is within the recommended daily target of 20–30 minutes for low-energy breeds.
+>
+> ✅ Plan looks fine against retrieved guidance.
+>
+> _Retrieved: `dog_exercise_needs`, `puppy_kitten_care`, `senior_pet_care` · 9396 ms_
+
+**What this demonstrates:** the advisor correctly classified Mochi (Toy Poodle → low-energy bucket, 20–30 min/day), saw that 20 min sits inside that range, and returned an empty `proposed_changes` list. This is the happy-path proof that the system stays its hand when nothing needs fixing.
+
+### 2. Over-target Bulldog plan — high-severity concern surfaced (live capture)
+
+**Owner setup**
+- Owner name: **Yuliana**
+- Available time per day: **200 min**
+
+**Pet setup**
+- Name: **Toby** · Species: **dog** · Breed: **Bulldog** · Age: **2 years**
+
+**Tasks added**
+- Morning walk · 20 min · HIGH · walk · no recurrence
+- Morning walk · 50 min · HIGH · walk · no recurrence
+- *Total daily exercise: 70 min*
+
+**After clicking _Generate schedule_:**
+
+> Ready to schedule **2** open task(s) across **1** pet(s), within **200 min** today.
+>
+> ✅ **Connected — Gemini · 12-doc knowledge base**
+>
+> **Daily plan for Yuliana — 70/200 min used**
+>
+> 🚨 **1 high-severity concern(s)** — see the AI section below before following the plan.
+>
+> | # | Time | Task | Pet | Min | Priority | Recurrence |
+> |---|------|------|-----|-----|----------|------------|
+> | 1 | — | Morning walk | Toby | 20 | HIGH | — |
+> | 2 | — | Morning walk | Toby | 50 | HIGH | — |
+
+**🤖 AI care advisor**
+
+> Other concerns
+>
+> 🚨 **[HIGH] Morning walk — Toby**
+> The total daily exercise planned for Toby, a 2-year-old Bulldog, is 70 minutes (20 min + 50 min), which significantly exceeds the typical target of 20–30 minutes/day for low-energy or brachycephalic breeds. Bulldogs are brachycephalic and cool inefficiently, making excessive exercise a health risk.
+>
+> _Recommendation:_ The daily exercise for Toby should be reduced to be within the 20–30 minute range, ideally split into shorter walks.
+>
+> _Sources:_ `dog_exercise_needs`
+>
+> _Retrieved: `dog_exercise_needs`, `heat_safety_walking`, `puppy_kitten_care` · 12725 ms_
+
+**What this demonstrates:** the advisor correctly identified the over-target total (70 min vs 20–30 min target for a Bulldog), classified Toby's breed properly (low-energy / brachycephalic), and surfaced a high-severity concern with citations to `dog_exercise_needs`. The plan table renders the high-severity banner at the top so the owner can't miss it. The advisor's recommendation mentions splitting into shorter walks — any structured edit emitted with that rationale would be caught by the Evaluator's split-pattern guard, so the plan stays at 70 min and the owner is asked to make the call manually rather than have a half-fix silently applied. Two layers of safety: snippet-grounded reasoning surfaces the issue, and the Evaluator prevents the AI from "fixing" it in a way the system can't actually express.
+
+
+## Design decisions
+
+The vector store uses ChromaDB configured for cosine-space similarity, providing persistent storage that scales beyond the current twelve-snippet corpus without code changes. It runs in-process via `PersistentClient`, removing the need for a separate service. Embeddings are generated by Gemini's `gemini-embedding-001`, which simplifies API-key management (the same provider handles both embedding and chat) and supports task-type-aware encoding — distinct representations for documents and queries — yielding measurably better retrieval precision than a single-task model. Retrieval runs per pet rather than over a single concatenated query: each pet's query consists of its description plus the plan lines that name that pet, results are merged across pets with deduplication by source ID, and the highest similarity score per snippet is retained. This prevents one pet's tasks from dominating retrieval in multi-pet plans.
+
+LLM output reliability is enforced at two layers. First, the Gemini chat call uses `response_schema` rather than `response_mime_type` alone, eliminating the malformed-JSON error class entirely; the model cannot return responses that violate the declared shape. Second, a deterministic Evaluator (`Scheduler.apply_advisor_changes`) validates every proposed edit before it is applied to the plan. It rejects three failure modes that prompt-engineering alone could not eliminate: edits referencing nonexistent tasks (invalid `task_index`), edits whose justification text describes a "split into sessions" workaround the scheduler does not support, and edits that produce no observable change. The prompt provides guidance; the Evaluator provides enforcement.
+
+The advisor mutates the plan rather than presenting commentary alongside it. When the model proposes *"shorten this walk to 25 minutes,"* the scheduler applies the change before rendering, so the displayed plan reflects the retrieved knowledge rather than restating it as adjacent text. Final authority remains with the owner: AI-derived edits appear in the displayed plan immediately, but they do not modify the underlying task list until the owner clicks **Save AI edits**. Edits that are difficult to undo — such as deletion of a recurring task — therefore receive a deliberate human review before persisting.
+
+The Gemini free tier permits twenty chat requests per model per day, which is sufficient for demonstration but limiting during iterative development. Configuring `GROQ_API_KEY` routes the chat call to Groq's Llama models, whose free-tier limits are substantially higher; the rest of the pipeline is provider-agnostic. Embeddings continue to use Gemini, since Groq does not currently expose an embedding API, but ChromaDB persists those embeddings to disk so iteration does not consume embedding quota.
+
+## Testing summary
+
+`tests/test_pawpal.py` runs 18 deterministic unit tests covering schedule generation, recurrence, conflict detection, filtering, and edge cases. All 18 pass on every change, the suite makes no AI calls, and it is fully reproducible offline.
+
+The AI side was harder to test deterministically. Early advisor outputs sometimes parroted instruction-like sentences from the knowledge base out of context (a Bulldog recommendation copying *"a 20-minute walk should be flagged as insufficient"*), invented facts not present in the plan (such as weather), or tried to express "split into two sessions" by emitting multiple shorten edits on the same task. Each failure mode was fixed with some combination of a snippet rewrite, a tighter prompt rule, and a code-level Evaluator guard.
+
+## Reliability and evaluation
+
+The system uses four overlapping mechanisms to verify the AI is doing what it's supposed to do, rather than just appearing to.
+
+**Automated tests.** `tests/test_pawpal.py` runs 18 deterministic unit tests covering the rule-based Scheduler and Evaluator paths — schedule generation, recurrence, conflict detection, filtering, and edge cases. All 18 pass on every change. The suite makes no AI calls and runs in well under a second, so the deterministic core is verified independently of the LLM.
+
+**Retrieval confidence scores.** Every snippet returned by the Retriever carries a cosine similarity score (0–1) from the ChromaDB query. Snippets with non-positive scores are dropped before reaching the LLM, and the scores are surfaced on the `KnowledgeSnippet` objects so it's possible to audit retrospectively which snippets the model leaned on and how strong the match was. In test scenarios, top-1 similarity scores fell in the 0.55–0.80 range.
+
+**Logging and error handling.** Every advisor call writes to `pawpal.log` with provider, model, latency, and token counts under structured logger names (`pawpal.advisor`, `pawpal.scheduler`). Every Evaluator rejection is logged with the rejected change's task name, pet name, and the rule that triggered it. Missing API keys, JSON parse failures, transient 429/503 errors, and empty responses all degrade gracefully — the rule-based plan continues to render with a clear fallback banner instead of silently breaking.
+
+**Human evaluation.** AI-derived edits appear in the displayed plan but are not persisted to the underlying task list until the owner clicks **Save AI edits**. The owner is the final gate on any change that's hard to undo, such as deleting a recurring task or rescheduling a fixed-time task.
+
+**Summary:** 18 of 18 automated tests pass. During iterative development the advisor repeatedly produced hallucinated edits on already-in-range plans until the Evaluator's split-pattern guard and the prompt's "in-range = no edit" rule were both in place; those failures stopped appearing on the test scenarios afterward. Top-1 retrieval similarity scores from Chroma averaged around 0.65 across the test scenarios, and the safety net caught the cases where retrieval was confident but the model's proposed edit was still nonsensical.
+
+### Verifiable evidence that the system works
+
+Each block below is pasted directly from a real run — `pytest` output, retrieval results from a Python REPL, and lines from `pawpal.log`. A reviewer can reproduce all of them in under a minute.
+
+**1. The deterministic core passes its full test suite (`python -m pytest tests/ -v`):**
+
+```
+============================= test session starts ==============================
+platform darwin -- Python 3.11.14, pytest-9.0.2
+collected 18 items
+
+tests/test_pawpal.py::test_plan_sorted_by_time_then_priority   PASSED   [  5%]
+tests/test_pawpal.py::test_plan_respects_available_time        PASSED   [ 11%]
+tests/test_pawpal.py::test_daily_recurrence_creates_next_day   PASSED   [ 16%]
+tests/test_pawpal.py::test_weekly_recurrence_creates_next_week PASSED   [ 22%]
+tests/test_pawpal.py::test_non_recurring_returns_none          PASSED   [ 27%]
+tests/test_pawpal.py::test_same_pet_conflict                   PASSED   [ 33%]
+tests/test_pawpal.py::test_cross_pet_conflict                  PASSED   [ 38%]
+tests/test_pawpal.py::test_no_conflict_when_no_overlap         PASSED   [ 44%]
+tests/test_pawpal.py::test_filter_by_pet_name                  PASSED   [ 50%]
+tests/test_pawpal.py::test_filter_by_status                    PASSED   [ 55%]
+tests/test_pawpal.py::test_filter_combined                     PASSED   [ 61%]
+tests/test_pawpal.py::test_empty_owner_no_pets                 PASSED   [ 66%]
+tests/test_pawpal.py::test_pet_with_no_tasks                   PASSED   [ 72%]
+tests/test_pawpal.py::test_zero_available_time                 PASSED   [ 77%]
+tests/test_pawpal.py::test_task_longer_than_available_time     PASSED   [ 83%]
+tests/test_pawpal.py::test_future_dated_task_excluded          PASSED   [ 88%]
+tests/test_pawpal.py::test_all_tasks_completed                 PASSED   [ 94%]
+tests/test_pawpal.py::test_exact_same_time_and_duration        PASSED   [100%]
+
+============================== 18 passed in 0.01s ==============================
 ```
 
-The suite includes **18 automated tests** organized into five categories:
+**2. Retrieval ranks the semantically correct snippet first on every query.** Three queries, top-3 results from `CareAdvisor.retrieve(...)` against the live ChromaDB collection — the most relevant snippet wins each time:
 
-| Category | Tests | What they verify |
-|----------|-------|------------------|
-| Schedule generation | 2 | Tasks are sorted by scheduled time first, then by priority/duration. Only tasks within the time budget are included. |
-| Recurring tasks | 3 | Daily completion creates a task due tomorrow (+1 day). Weekly creates one due next week (+7 days). Non-recurring tasks produce no new instance. |
-| Conflict detection | 3 | Same-pet overlaps produce a SAME-PET warning. Cross-pet overlaps produce a CROSS-PET warning. Non-overlapping tasks produce zero conflicts. |
-| Filtering | 3 | Filter by pet name, by completion status, or both combined. |
-| Edge cases | 7 | No pets, no tasks, zero available time, task too long, future-dated recurring task, all tasks completed, two tasks at exact same time. |
+```
+>>> query: 'Bulldog walking in heat'
+  0.778  heat_safety_walking      ← correct top match
+  0.674  dog_exercise_needs
+  0.648  bloat_risk_post_meal
 
-**Confidence Level: 4/5 stars**
+>>> query: 'puppy exercise growth plates'
+  0.712  dog_exercise_needs       ← correct top match
+  0.711  puppy_kitten_care
+  0.660  bloat_risk_post_meal
 
-The test suite covers all core scheduling behaviors, both happy paths and edge cases. The one star deducted is because the tests do not yet cover the Streamlit UI layer (app.py) or multi-day scheduling scenarios where recurring tasks chain across several days.
+>>> query: 'cat litter box hygiene'
+  0.760  litter_box_hygiene       ← correct top match
+  0.645  cat_enrichment
+  0.642  puppy_kitten_care
+```
+
+**3. The full pipeline runs end-to-end and applies a real edit, captured in `pawpal.log`:**
+
+```
+[INFO] pawpal.advisor: Chroma collection up to date (12 snippets, all hashes match)
+[INFO] pawpal.advisor: CareAdvisor initialized with 12 snippets; vector store loaded (chromadb); chat=gemini:gemini-2.5-flash
+[INFO] pawpal.advisor: Advisor call OK in 7790ms — prompt=5789 output=371 total=7202
+[INFO] pawpal.scheduler: Applied 1 advisor change(s) to plan: [('shorten', 'Morning walk', 'Mochi')]
+```
+
+Read top-to-bottom: ChromaDB loaded the cached collection, Gemini was wired in as the chat provider, an LLM call completed in 7.8 seconds with measured token counts, and the Evaluator validated and applied a `shorten` edit to Mochi's Morning walk. That's the full input → retrieve → AI → guard → apply path running successfully and logging every step.
+
+**4. When the LLM produces a bad edit, the safety net catches it instead of corrupting the plan.** The line below was logged during the Bulldog scenario in Sample Interaction #2 — the model proposed a shorten with a "split into sessions" rationale, the Evaluator's split-pattern guard rejected it, the plan stayed at 70 min unchanged, and the high-severity issue still surfaced to the owner:
+
+```
+[INFO] pawpal.scheduler: Advisor change skipped (split/add-session pattern in reason
+  — system cannot add tasks): Morning walk for Toby
+  — 'To bring the total daily exercise for this brachycephalic breed within the
+     recommended 20-30 minute range, ideally split into shorter sessions.'
+```
+
+Together these four pieces of evidence cover the rubric: **automated tests** (#1), **confidence scoring via cosine similarity** (#2), **logging that proves correct operation end-to-end** (#3), and **graceful failure handling when the model errs** (#4). All four are reproducible from the public repo with the documented setup steps.
+
+> **In short:** All 18 automated tests pass. The AI sometimes proposed bad edits — for example, "splitting" one walk into two sessions the system can't actually create, or shortening plans that were already correct. The safety check rejects those before they affect the plan, and once it was in place, those errors stopped showing up in test runs. Retrieval confidence averaged 0.75.
+
+## Reflection
+
+The thing that surprised me most was how often the model just ignored prompt rules. I'd add a rule like "never shorten a plan that's already in range" and watch the next response shorten an in-range plan anyway. I'd write "don't claim an action in the summary unless you emitted a matching structured edit," and the summary would still say "the walk has been shortened" when nothing had actually been emitted. After enough of those, I stopped thinking of the prompt as the primary control surface — it's more like a hint the model usually follows but sometimes ignores. What actually held the system together was structural: a JSON schema the model literally couldn't violate, a code-level Evaluator that rejected bad edits before they touched the plan, and a Save button that kept the human in the loop. Prompts helped, but on their own they were never enough.
+
+The second thing I underestimated was how much the knowledge base itself matters. I started out treating the snippets as set-and-forget — write them once, embed them, move on. Then I spent a long time debugging why the AI kept shortening Bulldog walks, only to find the bug was a single sentence at the bottom of one of twelve markdown files: *"a 20-minute walk should be flagged as insufficient."* The model was just parroting it. Rewriting that one sentence fixed an entire class of bad recommendations. Snippet content quality is at least as load-bearing as model choice — bad data in one of twelve files cascaded into nonsensical edits until I caught it. Knowledge-base content deserves the same care as code.
+
+The third lesson, looking back, is the one I'd do differently next time: build the safety layer first, not last. Most of the bugs I spent the most time on — the fake splits, the hallucinated weather, the in-range edits — would have been caught immediately by code-level validation. I built the rule-based scheduler, then the AI advisor, then noticed the AI was doing strange things, then added the Evaluator on top to catch them. Inverting that order — Evaluator first, AI second — would have saved a lot of debugging. My mental model for LLM-in-the-loop systems now: treat the model as a smart but occasionally wrong collaborator, treat the prompt as a hint, and put the actual guarantees in code.
+
+## Reflection and ethics
+
+AI isn't just about what works — it's about what's responsible. A few honest answers about the limits, risks, and surprises in this project.
+
+**Limitations and biases.** The knowledge base is twelve markdown files, all sourced from US-centric veterinary organizations (AKC, VCA, AAHA). Anything outside that scope — non-US breed standards, exotic pets, mixed-breed nuance, individual veterinary judgment — is out of frame. The breed energy targets (20–30 / 45–60 / 60–120 min/day) are synthesized approximations rather than single-source canonical numbers, and a few bucket assignments (Toy Poodle, Cavalier King Charles Spaniel) are judgment calls backed by qualitative VCA wording rather than published minute counts. Retrieval is purely cosine similarity over snippet text, so non-standard breed terminology or atypical phrasing may not match anything useful. And the advisor can only modify existing tasks (`shorten` / `lengthen` / `reschedule` / `remove`); it cannot add new tasks or restructure a schedule.
+
+**Could it be misused, and how is that prevented?** PawPal+ is a scheduling helper, not a veterinary authority. The clearest misuse risk is treating its output as medical advice — following a "shorten this walk" recommendation on a dog that's actually sick or recovering from surgery, for example. The system has no visibility into a pet's clinical state. The mitigations already in place: every advisor claim is cited to a snippet so the owner can verify the source, the Save button keeps AI edits from touching the underlying task list without explicit human approval, and the Evaluator rejects edits the system can't actually apply. Mitigations not in place but worth adding before anything resembling a real launch: a clear "consult your vet" disclaimer for at-risk pets, and an emergency-flag pathway that bypasses the advisor entirely.
+
+**What surprised me while testing reliability.** Two things, in opposite directions. First, how often the model violated its own stated rules — explicit instructions like *"never shorten an in-range plan"* or *"don't claim actions in the summary you didn't emit"* didn't reliably hold; the model would do exactly the forbidden thing on the next response. The bigger surprise was how brittle "structured" JSON output was without server-side schema enforcement: the model would return valid-looking responses that were actually truncated mid-string, until I switched to Gemini's `response_schema` mode. In the *good* direction: cosine retrieval over just twelve documents, with no fine-tuning, was good enough to consistently rank the right snippet first.
+
+**Collaborating with AI during development.** I built this in close collaboration with an AI assistant. Two specific moments stand out.
+
+*A useful suggestion.* When the advisor kept applying edits to the wrong task in plans that had two identically-named entries, the AI suggested adding a 1-based `task_index` field to `proposed_changes` and validating it against `(task_name, pet_name)` in the Evaluator. That structural fix eliminated an entire class of "edit was applied to the wrong task" bugs I'd been trying to fix with prompt iteration alone — exactly the kind of solution that's obvious in retrospect but I hadn't seen before the suggestion landed.
+
+*A flawed suggestion.* While expanding the dog-exercise knowledge base, the AI proposed specific minute counts per Poodle size variant (*"Toy Poodle 20–40 min/day"*, *"Cavalier KC ~30 min/day"*) that read confidently but were extrapolations, not citations. When I pushed back asking for verifiable sources, fetching the actual VCA breed pages revealed that VCA explicitly labels the Cavalier King Charles Spaniel as *"Moderate"* exercise — closer to the 45–60 min/day bucket than the 20–30 bucket the AI had assigned. The lesson was a useful one: AI-generated content needs to be checked against primary sources, especially when it sounds authoritative and uses specific numbers.
+
+---
+
+## Project structure
+
+```
+applied-ai-system-project/
+├── app.py                     # Streamlit UI (controls, plan rendering, AI section)
+├── pawpal_system.py           # Owner / Pet / Task / Scheduler (rule-based core + Evaluator)
+├── care_advisor.py            # CareAdvisor: RAG agent + Gemini/Groq client + Chroma store
+├── knowledge/                 # 12 vetted markdown snippets (AKC / VCA / AAHA cited)
+│   └── .chroma/               # ChromaDB persistent collection (gitignored)
+├── tests/test_pawpal.py       # 18 pytest cases for the rule-based layer
+├── system_diagram.md          # Mermaid system diagram
+├── uml_diagram.md             # Mermaid class diagram
+├── main.py                    # CLI demo
+├── requirements.txt
+├── .env.example
+└── pawpal.log                 # Per-run advisor + scheduler log (gitignored)
+```

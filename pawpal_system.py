@@ -1,7 +1,14 @@
+import dataclasses
+import logging
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from enum import IntEnum
-from typing import List, Optional
+from typing import List, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from care_advisor import AdvisorReview, CareAdvisor, ProposedChange
+
+logger = logging.getLogger("pawpal.scheduler")
 
 
 class Priority(IntEnum):
@@ -140,9 +147,11 @@ class Owner:
 
 
 class Scheduler:
-    def __init__(self, owner: Owner):
+    def __init__(self, owner: Owner, advisor: Optional["CareAdvisor"] = None):
         self.owner = owner
         self.conflicts: List[str] = []
+        self.advisor = advisor
+        self.review: Optional["AdvisorReview"] = None
 
     def _collect_eligible_tasks(self) -> List[Task]:
         """Gather incomplete tasks that are due today or have no due date."""
@@ -234,7 +243,239 @@ class Scheduler:
                 remaining_time -= task.duration
 
         self.conflicts = self._detect_conflicts(plan)
+        self.review = None
         return plan
+
+    def _describe_pets(self) -> List[str]:
+        descs = []
+        for pet in self.owner.pets:
+            parts = [pet.name, f"{pet.species}"]
+            if pet.breed:
+                parts.append(pet.breed)
+            if pet.age:
+                parts.append(f"{pet.age} years old")
+            descs.append(", ".join(parts))
+        return descs
+
+    def _describe_plan(self, plan: List[Task]) -> List[str]:
+        lines = []
+        for task in plan:
+            time_str = (
+                f"{self._fmt_time(task.scheduled_time)}-"
+                f"{self._fmt_time(task.end_time)}"
+                if task.scheduled_time is not None
+                else "unscheduled"
+            )
+            recur = f", {task.recurrence} recurring" if task.is_recurring else ""
+            lines.append(
+                f"{time_str}: '{task.name}' for {task.pet_name}, "
+                f"{task.duration} min, {task.priority.name} priority, "
+                f"{task.category} category{recur}"
+            )
+        return lines
+
+    def run_advisor_review(self, plan: List[Task]) -> Optional["AdvisorReview"]:
+        """Ask the AI advisor to critique the generated plan via RAG."""
+        if self.advisor is None or not plan:
+            return None
+        plan_lines = self._describe_plan(plan)
+        pet_descriptions = self._describe_pets()
+        self.review = self.advisor.review_plan(plan_lines, pet_descriptions)
+        return self.review
+
+    def apply_advisor_changes(
+        self,
+        plan: List[Task],
+        review: Optional["AdvisorReview"],
+    ) -> Tuple[List[Task], List["ProposedChange"]]:
+        """Mutate a copy of the plan according to the advisor's structured
+        proposed_changes so the plan the owner sees actually reflects the
+        retrieved guidance. Returns (modified_plan, applied_changes).
+
+        Tasks are copied via dataclasses.replace before edits so the owner's
+        underlying Pet.tasks lists are never mutated.
+        """
+        if review is None or not review.available or not review.proposed_changes:
+            return plan, []
+
+        new_plan = list(plan)
+        applied: List["ProposedChange"] = []
+
+        for change in review.proposed_changes:
+            # Reject changes whose reason describes a split / new session.
+            # Our scheduler has no add-task operation; the model has
+            # repeatedly tried to fake one by emitting a shorten with
+            # "split into two sessions" rationale, which leaves a single
+            # too-short task instead of two sessions. Catch that here so
+            # the in-range plan isn't silently mutilated.
+            if self._reason_describes_split(change.reason):
+                logger.info(
+                    "Advisor change skipped (split/add-session pattern in "
+                    "reason — system cannot add tasks): %s for %s — %r",
+                    change.task_name,
+                    change.pet_name,
+                    change.reason,
+                )
+                continue
+
+            target = self._resolve_target(plan, change)
+            if target is None:
+                logger.info(
+                    "Advisor change skipped (no matching task): %s for %s "
+                    "(task_index=%s)",
+                    change.task_name,
+                    change.pet_name,
+                    change.task_index,
+                )
+                continue
+
+            # Locate target in new_plan, which may have shifted after prior
+            # pops or been replaced (in-place) by an earlier shorten/lengthen/
+            # reschedule on the same task. Identity match first; fall back to
+            # name+pet — the replacement copy preserves both fields.
+            idx = next(
+                (i for i, t in enumerate(new_plan) if t is target), None
+            )
+            if idx is None:
+                idx = next(
+                    (
+                        i
+                        for i, t in enumerate(new_plan)
+                        if t.name == target.name and t.pet_name == target.pet_name
+                    ),
+                    None,
+                )
+            if idx is None:
+                logger.info(
+                    "Advisor change skipped (target already removed): %s for %s",
+                    change.task_name,
+                    change.pet_name,
+                )
+                continue
+            task = new_plan[idx]
+
+            if change.change_type == "remove":
+                new_plan.pop(idx)
+                applied.append(change)
+                # For non-recurring tasks, also delete from the owner's task
+                # list so the task doesn't reappear in future plans. Recurring
+                # tasks keep their template — the advisor only meant to skip
+                # today's instance, not kill the daily/weekly cadence.
+                if not task.is_recurring:
+                    for pet in self.owner.pets:
+                        if task in pet.tasks:
+                            pet.tasks.remove(task)
+                            logger.info(
+                                "Deleted non-recurring task '%s' from %s.tasks per advisor",
+                                task.name,
+                                pet.name,
+                            )
+                            break
+            elif change.change_type == "shorten":
+                new_dur = change.new_duration_min
+                if new_dur and 0 < new_dur < task.duration:
+                    new_plan[idx] = dataclasses.replace(task, duration=new_dur)
+                    applied.append(change)
+            elif change.change_type == "lengthen":
+                new_dur = change.new_duration_min
+                if new_dur and new_dur > task.duration:
+                    new_plan[idx] = dataclasses.replace(task, duration=new_dur)
+                    applied.append(change)
+            elif change.change_type == "reschedule":
+                new_start = self._parse_hhmm(change.new_start_hhmm)
+                if new_start is not None:
+                    new_plan[idx] = dataclasses.replace(
+                        task, scheduled_time=new_start
+                    )
+                    applied.append(change)
+            else:
+                logger.warning(
+                    "Unknown advisor change_type '%s' — skipped",
+                    change.change_type,
+                )
+
+        if applied:
+            logger.info(
+                "Applied %d advisor change(s) to plan: %s",
+                len(applied),
+                [(c.change_type, c.task_name, c.pet_name) for c in applied],
+            )
+        return new_plan, applied
+
+    _SPLIT_REASON_PHRASES = (
+        "split into",
+        "two sessions",
+        "two shorter sessions",
+        "two walks",
+        "second walk",
+        "second session",
+        "add a walk",
+        "add a session",
+        "add a second",
+        "additional walk",
+        "additional session",
+        "more frequent walks",
+        "more frequent sessions",
+        "shorter sessions",
+    )
+
+    @classmethod
+    def _reason_describes_split(cls, reason: Optional[str]) -> bool:
+        """True when the advisor's reason text is trying to describe adding
+        a session or splitting a task — patterns the scheduler can't honor
+        because there's no add-task operation."""
+        if not reason:
+            return False
+        lowered = reason.lower()
+        return any(phrase in lowered for phrase in cls._SPLIT_REASON_PHRASES)
+
+    @staticmethod
+    def _resolve_target(
+        plan: List[Task], change: "ProposedChange"
+    ) -> Optional[Task]:
+        """Resolve a ProposedChange to the specific Task in the original plan
+        it targets. Prefers `task_index` (1-based, validated against name+pet)
+        and falls back to (task_name, pet_name) match if the index is missing
+        or doesn't validate. Returns None if no match."""
+        if change.task_index is not None:
+            idx = change.task_index - 1
+            if 0 <= idx < len(plan):
+                candidate = plan[idx]
+                if (
+                    candidate.name == change.task_name
+                    and candidate.pet_name == change.pet_name
+                ):
+                    return candidate
+                logger.warning(
+                    "task_index=%d points at '%s' for %s but change names "
+                    "'%s' for %s — falling back to name+pet match",
+                    change.task_index,
+                    candidate.name,
+                    candidate.pet_name,
+                    change.task_name,
+                    change.pet_name,
+                )
+        return next(
+            (
+                t
+                for t in plan
+                if t.name == change.task_name and t.pet_name == change.pet_name
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _parse_hhmm(hhmm: Optional[str]) -> Optional[int]:
+        if not hhmm:
+            return None
+        try:
+            hh, mm = hhmm.split(":")
+            minutes = int(hh) * 60 + int(mm)
+        except (ValueError, AttributeError):
+            return None
+        if 0 <= minutes < 24 * 60:
+            return minutes
+        return None
 
     def get_explanation(self) -> str:
         """Return a human-readable summary of the daily plan with reasoning."""

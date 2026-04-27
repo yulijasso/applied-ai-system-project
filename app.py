@@ -1,14 +1,19 @@
 from datetime import date
 import streamlit as st
 from pawpal_system import Owner, Pet, Task, Priority, Scheduler
+from care_advisor import CareAdvisor
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
 if "owner" not in st.session_state:
     st.session_state.owner = Owner("Jordan", available_time=120)
 
+if "advisor" not in st.session_state:
+    st.session_state.advisor = CareAdvisor()
+
 owner = st.session_state.owner
-scheduler = Scheduler(owner)
+advisor = st.session_state.advisor
+scheduler = Scheduler(owner, advisor=advisor)
 
 st.title("🐾 PawPal+")
 
@@ -149,57 +154,269 @@ else:
 
 # ── Generate Schedule ────────────────────────────────────────
 st.divider()
-st.subheader("Build Schedule")
+st.subheader("Build schedule")
 
-if st.button("Generate schedule"):
-    if not owner.get_all_tasks():
-        st.warning("Add at least one task before generating a schedule.")
+def _format_change(c, draft_lookup):
+    """One-line summary of an applied advisor change for the edits table."""
+    old = draft_lookup.get((c.task_name, c.pet_name))
+    if c.change_type == "remove":
+        if old and old.is_recurring:
+            return "Removed from today (recurring template kept)"
+        return "Deleted from task list"
+    if c.change_type in ("shorten", "lengthen") and old:
+        return f"{old.duration} min → {c.new_duration_min} min"
+    if c.change_type == "reschedule" and old:
+        old_t = (
+            Scheduler._fmt_time(old.scheduled_time)
+            if old.scheduled_time is not None
+            else "—"
+        )
+        return f"{old_t} → {c.new_start_hhmm}"
+    return c.change_type
+
+
+_total_tasks = len(owner.get_all_tasks())
+_open_tasks = len(owner.get_tasks_by_status(completed=False))
+_n_pets = len(owner.pets)
+
+if _total_tasks == 0:
+    st.caption("Add at least one task above to generate a plan.")
+else:
+    st.caption(
+        f"Ready to schedule **{_open_tasks}** open task(s) across "
+        f"**{_n_pets}** pet(s), within **{owner.available_time} min** today."
+    )
+
+ctrl_left, ctrl_right = st.columns([2, 1], vertical_alignment="center")
+with ctrl_left:
+    use_advisor = st.checkbox(
+        "Use AI care advisor",
+        value=advisor.is_available,
+        disabled=not advisor.is_available,
+        help=(
+            "Retrieves curated pet-care knowledge via embeddings, then asks "
+            "Gemini to flag risks and edit the plan (shorten / reschedule / "
+            "remove) when a snippet supports it. Edits are applied before "
+            "the plan is shown."
+        ),
+    )
+    if not advisor.is_available:
+        st.warning(
+            "Offline — set `GEMINI_API_KEY` in `.env` to enable",
+            icon=":material/key_off:",
+        )
+    elif use_advisor:
+        chat_provider = (
+            "Groq" if advisor._groq_client is not None else "Gemini"
+        )
+        st.success(
+            f"Connected — {chat_provider} · {len(advisor.snippets)}-doc knowledge base",
+            icon=":material/check_circle:",
+        )
+with ctrl_right:
+    generate_clicked = st.button(
+        "Generate schedule",
+        type="primary",
+        use_container_width=True,
+        disabled=_total_tasks == 0,
+    )
+
+if generate_clicked:
+    if not (draft_plan := scheduler.generate_plan()):
+        st.warning("No tasks could be scheduled. Check available time or add tasks.")
     else:
-        plan = scheduler.generate_plan()
+        review = None
+        if use_advisor and advisor.is_available:
+            with st.spinner("Consulting AI care advisor..."):
+                review = scheduler.run_advisor_review(draft_plan)
 
-        if not plan:
-            st.warning("No tasks could be scheduled. Check your available time or add tasks.")
-        else:
-            # Show conflict warnings first so the owner sees them immediately
-            if scheduler.conflicts:
-                for conflict in scheduler.conflicts:
-                    st.warning(conflict)
+        eligible = scheduler._collect_eligible_tasks()
+        skipped = [t for t in eligible if t not in draft_plan]
+        final_plan, applied_changes = scheduler.apply_advisor_changes(
+            draft_plan, review
+        )
+        draft_lookup = {(t.name, t.pet_name): t for t in draft_plan}
+        # Use object identity so the 🤖 badge only attaches to tasks that
+        # were actually replaced (shorten/lengthen/reschedule produce new
+        # Task instances; unchanged tasks are still the draft references).
+        # Keying by (name, pet) misfires when the user has duplicate-named
+        # tasks and only one of them was modified.
+        draft_ids = {id(t) for t in draft_plan}
+        modified_task_ids = {id(t) for t in final_plan if id(t) not in draft_ids}
+        modified_keys = {(c.task_name, c.pet_name) for c in applied_changes}
+
+        # ── Plan headline + table ─────────────────────────────────
+        total_time = sum(t.duration for t in final_plan)
+        ai_badge = (
+            f"  ·  🤖 {len(applied_changes)} AI edit(s)" if applied_changes else ""
+        )
+        st.success(
+            f"Daily plan for {owner.name} — "
+            f"{total_time}/{owner.available_time} min used{ai_badge}"
+        )
+
+        if review is not None and review.available:
+            high = [i for i in review.issues if i.severity == "high"]
+            if high:
                 st.error(
-                    f"{len(scheduler.conflicts)} time conflict(s) detected! "
-                    "Consider rescheduling the tasks above to avoid overlaps."
+                    f"🚨 {len(high)} high-severity concern(s) — see the AI "
+                    "section below before following the plan."
                 )
 
-            # Display the sorted plan as a clean table
-            total_time = sum(t.duration for t in plan)
-            st.success(
-                f"Daily plan for {owner.name} — "
-                f"{total_time}/{owner.available_time} minutes used"
+        if scheduler.conflicts:
+            st.error(
+                f"{len(scheduler.conflicts)} time conflict(s) detected — "
+                "consider rescheduling the overlapping tasks."
             )
+            for conflict in scheduler.conflicts:
+                st.caption(f"• {conflict}")
 
-            st.table([
-                {
-                    "#": i,
-                    "Time": Scheduler._fmt_time(t.scheduled_time) if t.scheduled_time is not None else "-",
-                    "Task": t.name,
-                    "Pet": t.pet_name,
-                    "Duration (min)": t.duration,
-                    "Priority": t.priority.name,
-                    "Recurrence": t.recurrence or "-",
-                }
-                for i, t in enumerate(plan, start=1)
-            ])
+        st.table([
+            {
+                "#": i,
+                "Time": (
+                    Scheduler._fmt_time(t.scheduled_time)
+                    if t.scheduled_time is not None
+                    else "—"
+                ),
+                "Task": ("🤖 " if id(t) in modified_task_ids else "") + t.name,
+                "Pet": t.pet_name,
+                "Min": t.duration,
+                "Priority": t.priority.name,
+                "Recurrence": t.recurrence or "—",
+            }
+            for i, t in enumerate(final_plan, start=1)
+        ])
 
-            # Show skipped tasks
-            eligible = scheduler._collect_eligible_tasks()
-            skipped = [t for t in eligible if t not in plan]
-            if skipped:
-                st.warning("The following tasks did not fit in today's schedule:")
+        if skipped:
+            with st.expander(f"⏭️ Tasks that didn't fit ({len(skipped)})"):
                 st.table([
                     {
                         "Task": t.name,
                         "Pet": t.pet_name,
-                        "Duration (min)": t.duration,
+                        "Min": t.duration,
                         "Priority": t.priority.name,
                     }
                     for t in skipped
                 ])
+
+        # ── AI advisor section ────────────────────────────────────
+        if review is not None:
+            st.divider()
+            st.subheader("🤖 AI care advisor")
+
+            if not review.available:
+                st.info(f"Advisor unavailable: {review.error}")
+            else:
+                if review.summary:
+                    st.markdown(review.summary)
+
+                if applied_changes:
+                    st.markdown("**Edits applied to the plan**")
+                    st.table([
+                        {
+                            "Task": f"{c.task_name} ({c.pet_name})",
+                            "Change": _format_change(c, draft_lookup),
+                            "Reason": c.reason,
+                            "Sources": ", ".join(c.citations) or "—",
+                        }
+                        for c in applied_changes
+                    ])
+                    permanent = [
+                        c for c in applied_changes
+                        if c.change_type == "remove"
+                        and (old := draft_lookup.get((c.task_name, c.pet_name)))
+                        and not old.is_recurring
+                    ]
+                    if permanent:
+                        st.warning(
+                            f"🗑️ {len(permanent)} non-recurring task(s) "
+                            "were deleted from your task list permanently."
+                        )
+                    # Persist enough state for the Save-to-task-list button
+                    # rendered below (a button click triggers a fresh rerun
+                    # where generate_clicked is False, so the in-block button
+                    # would be unreachable).
+                    st.session_state["pending_save"] = {
+                        "draft_plan": list(draft_plan),
+                        "applied_changes": list(applied_changes),
+                    }
+                else:
+                    st.session_state.pop("pending_save", None)
+
+                other_issues = [
+                    i for i in review.issues
+                    if (i.task_name, i.pet_name) not in modified_keys
+                ]
+                if other_issues:
+                    st.markdown("**Other concerns**")
+                    for item in other_issues:
+                        icon = {"high": "🚨", "medium": "⚠️", "low": "💡"}.get(
+                            item.severity, "•"
+                        )
+                        sources = (
+                            ", ".join(f"`{c}`" for c in item.citations) or "—"
+                        )
+                        st.markdown(
+                            f"{icon} **[{item.severity.upper()}] "
+                            f"{item.task_name} — {item.pet_name}**  \n"
+                            f"{item.issue}  \n"
+                            f"_Recommendation:_ {item.recommendation}  \n"
+                            f"_Sources:_ {sources}"
+                        )
+
+                if not applied_changes and not review.issues:
+                    st.success("Plan looks fine against retrieved guidance.")
+
+                if review.retrieved_sources:
+                    st.caption(
+                        "Retrieved: "
+                        + ", ".join(f"`{s}`" for s in review.retrieved_sources)
+                        + f"  ·  {review.latency_ms} ms"
+                    )
+
+
+# ── Persist AI edits to the underlying task list ─────────────
+# Lives outside `if generate_clicked:` so the click survives the rerun
+# (Streamlit reruns the script on each interaction; without session_state
+# the applied_changes would be unavailable in the rerun the Save click
+# triggers).
+_pending = st.session_state.get("pending_save")
+if _pending:
+    if st.button(
+        f"Save {len(_pending['applied_changes'])} AI edit(s) to your task list",
+        icon=":material/save:",
+        help=(
+            "Updates the underlying tasks (durations, scheduled times, "
+            "and recurring-task removals) so future plans reflect the "
+            "advisor's edits. Non-recurring removals are already applied."
+        ),
+    ):
+        saved = 0
+        for c in _pending["applied_changes"]:
+            target = Scheduler._resolve_target(_pending["draft_plan"], c)
+            if target is None:
+                continue
+            if c.change_type in ("shorten", "lengthen") and c.new_duration_min:
+                target.duration = c.new_duration_min
+                saved += 1
+            elif c.change_type == "reschedule":
+                new_start = Scheduler._parse_hhmm(c.new_start_hhmm)
+                if new_start is not None:
+                    target.scheduled_time = new_start
+                    saved += 1
+            elif c.change_type == "remove" and target.is_recurring:
+                # Non-recurring removes already deleted at apply time;
+                # recurring ones are kept by default and removed here only
+                # when the owner explicitly clicks Save.
+                for pet in owner.pets:
+                    if target in pet.tasks:
+                        pet.tasks.remove(target)
+                        saved += 1
+                        break
+        del st.session_state["pending_save"]
+        st.success(
+            f"Saved {saved} edit(s) to your task list. "
+            "Re-generate to see the updated plan."
+        )
+        st.rerun()
