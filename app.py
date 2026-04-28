@@ -1,5 +1,26 @@
+import os
 from datetime import date
 import streamlit as st
+
+# Mirror Streamlit Cloud secrets into os.environ BEFORE CareAdvisor reads
+# them via os.getenv. Streamlit Cloud exposes secrets through st.secrets,
+# but the env-var injection isn't guaranteed to happen before module-load
+# code in dependent files runs. Copying explicitly here is safe and idempotent.
+try:
+    for _key in (
+        "GEMINI_API_KEY",
+        "GROQ_API_KEY",
+        "GEMINI_MODEL",
+        "GROQ_MODEL",
+        "GEMINI_EMBEDDING_MODEL",
+        "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION",
+    ):
+        if _key in st.secrets:
+            os.environ.setdefault(_key, str(st.secrets[_key]))
+except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
+    # No secrets.toml locally — fall through to .env loaded by dotenv inside care_advisor.
+    pass
+
 from pawpal_system import Owner, Pet, Task, Priority, Scheduler
 from care_advisor import CareAdvisor
 
