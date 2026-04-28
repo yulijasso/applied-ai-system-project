@@ -9,10 +9,20 @@ rule-based output.
 
 from __future__ import annotations
 
+import os
+
+# Force protobuf into pure-Python mode BEFORE any import that transitively
+# pulls in protobuf-generated stubs (chromadb -> opentelemetry-proto). The
+# pre-compiled stubs in `opentelemetry-proto` are stricter than newer
+# protobuf C++ runtimes and raise a TypeError on startup in some Streamlit
+# Cloud / Python 3.11+ environments. Switching the implementation to pure
+# Python skips that descriptor-version check. Has no effect locally on
+# environments where the C++ protobuf runtime is already happy.
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
 import hashlib
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
