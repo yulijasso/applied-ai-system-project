@@ -215,10 +215,10 @@ Strict rules:
             logger.exception("Failed to initialize Gemini client: %s", exc)
             return
 
-        # Optional Groq client — when present, chat calls go to Groq while
-        # embeddings still use Gemini (Groq has no embedding API). Useful as
-        # a fallback when Gemini's daily generate_content quota is hit, since
-        # Groq's free tier has separate, much higher limits.
+        # Optional Groq client — when present, chat calls can be routed to
+        # Groq while embeddings still use Gemini (Groq has no embedding API).
+        # Useful as a fallback when Gemini's daily generate_content quota is
+        # hit, since Groq's free tier has separate, much higher limits.
         self._groq_client = None
         groq_key = os.getenv("GROQ_API_KEY")
         if groq_key:
@@ -237,13 +237,23 @@ Strict rules:
             except Exception as exc:
                 logger.exception("Failed to initialize Groq client: %s", exc)
 
+        # Chat provider selection — defaults to Groq when both are available
+        # (since Groq has more generous free-tier limits) but the UI can flip
+        # this at any point via set_chat_provider().
+        if self._groq_client is not None:
+            self._chat_provider = "groq"
+        elif self._client is not None:
+            self._chat_provider = "gemini"
+        else:
+            self._chat_provider = None
+
         if self.snippets:
             self._collection = self._sync_chroma_collection()
 
         chat_label = (
             f"groq:{GROQ_MODEL}"
-            if self._groq_client is not None
-            else f"gemini:{ADVISOR_MODEL}"
+            if self._chat_provider == "groq"
+            else (f"gemini:{ADVISOR_MODEL}" if self._chat_provider == "gemini" else "none")
         )
         logger.info(
             "CareAdvisor initialized with %d snippets from %s; vector store %s; chat=%s",
@@ -260,6 +270,37 @@ Strict rules:
             and bool(self.snippets)
             and self._collection is not None
         )
+
+    @property
+    def available_providers(self) -> List[str]:
+        """List of chat providers the user can pick between, in display order."""
+        out: List[str] = []
+        if self._client is not None:
+            out.append("gemini")
+        if self._groq_client is not None:
+            out.append("groq")
+        return out
+
+    @property
+    def chat_provider(self) -> Optional[str]:
+        """Currently selected chat provider — 'gemini', 'groq', or None."""
+        return self._chat_provider
+
+    def set_chat_provider(self, provider: str) -> None:
+        """Switch which provider handles the chat call. Embeddings always
+        stay on Gemini regardless. Raises if the requested provider's client
+        was never initialized (e.g., asking for groq without GROQ_API_KEY)."""
+        if provider == "gemini":
+            if self._client is None:
+                raise ValueError("Gemini client not initialized (missing GEMINI_API_KEY)")
+        elif provider == "groq":
+            if self._groq_client is None:
+                raise ValueError("Groq client not initialized (missing GROQ_API_KEY or groq package)")
+        else:
+            raise ValueError(f"Unknown chat provider: {provider!r}")
+        if self._chat_provider != provider:
+            logger.info("Chat provider switched: %s -> %s", self._chat_provider, provider)
+            self._chat_provider = provider
 
     def _load_snippets(self) -> List[KnowledgeSnippet]:
         if not self.knowledge_dir.exists():
@@ -504,7 +545,7 @@ Strict rules:
         (raw_response_text, usage_dict). Embeddings always go through Gemini
         regardless of which provider handles chat — Groq has no embedding API.
         """
-        if self._groq_client is not None:
+        if self._chat_provider == "groq":
             response = self._groq_client.chat.completions.create(
                 model=GROQ_MODEL,
                 messages=[

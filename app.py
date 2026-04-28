@@ -195,22 +195,44 @@ with ctrl_left:
         disabled=not advisor.is_available,
         help=(
             "Retrieves curated pet-care knowledge via embeddings, then asks "
-            "Gemini to flag risks and edit the plan (shorten / reschedule / "
-            "remove) when a snippet supports it. Edits are applied before "
-            "the plan is shown."
+            "the chosen LLM to flag risks and edit the plan (shorten / "
+            "reschedule / remove) when a snippet supports it. Edits are "
+            "applied before the plan is shown."
         ),
     )
+
+    # Provider switcher — only shown when both providers are available and
+    # the advisor is on. Embeddings always use Gemini regardless of choice.
+    if advisor.is_available and use_advisor:
+        providers = advisor.available_providers
+        if len(providers) > 1:
+            label_for = {"gemini": "Gemini", "groq": "Groq"}
+            selected = st.radio(
+                "Chat model provider",
+                options=providers,
+                index=providers.index(advisor.chat_provider or providers[0]),
+                format_func=lambda p: label_for.get(p, p),
+                horizontal=True,
+                help=(
+                    "Switch which LLM handles the chat call. Useful when "
+                    "one provider's daily quota is exhausted. Embeddings "
+                    "always go through Gemini."
+                ),
+            )
+            if selected != advisor.chat_provider:
+                advisor.set_chat_provider(selected)
+
     if not advisor.is_available:
         st.warning(
             "Offline — set `GEMINI_API_KEY` in `.env` to enable",
             icon=":material/key_off:",
         )
     elif use_advisor:
-        chat_provider = (
-            "Groq" if advisor._groq_client is not None else "Gemini"
+        provider_label = {"gemini": "Gemini", "groq": "Groq"}.get(
+            advisor.chat_provider, advisor.chat_provider or "—"
         )
         st.success(
-            f"Connected — {chat_provider} · {len(advisor.snippets)}-doc knowledge base",
+            f"Connected — {provider_label} · {len(advisor.snippets)}-doc knowledge base",
             icon=":material/check_circle:",
         )
 with ctrl_right:
