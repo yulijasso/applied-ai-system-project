@@ -3,5 +3,13 @@ pytest>=7.0
 google-genai>=0.3
 groq>=0.11
 numpy>=1.24
-chromadb>=0.4
 python-dotenv>=1.0
+
+# ChromaDB + tight pins on its protobuf-generating deps. The pre-compiled
+# .pb stubs in older `opentelemetry-proto` releases use the legacy descriptor
+# API and crash on Streamlit Cloud's protobuf runtime; pinning to ≥1.27 forces
+# regenerated stubs that work with modern protobuf.
+chromadb>=0.5.20
+opentelemetry-proto>=1.27.0
+opentelemetry-exporter-otlp-proto-grpc>=1.27.0
+protobuf>=4.25,<6
