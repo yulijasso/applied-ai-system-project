@@ -1,5 +1,7 @@
 # PawPal+ 
 
+Link to the demo: https://youtu.be/FzfOw9J9Ug8
+
 > **PawPal** (Module 2 project): a Streamlit app that helps a pet owner plan daily care tasks for one or more pets. It uses plain Python classes (`Owner` / `Pet` / `Task` / `Scheduler`) to generate a daily plan within a configurable time budget, detect overlapping or conflicting tasks, and handle daily/weekly recurrence. Entirely rule-based — no AI in the original scope.
 
 
