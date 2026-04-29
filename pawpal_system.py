@@ -306,7 +306,58 @@ class Scheduler:
         Tasks are copied via dataclasses.replace before edits so the owner's
         underlying Pet.tasks lists are never mutated.
         """
-        if review is None or not review.available or not review.proposed_changes:
+        if review is None or not review.available:
+            return plan, []
+
+        proposed_changes = list(review.proposed_changes)
+
+        # Safety net: if the advisor raised an issue about a feeding task with
+        # a non-daily cadence but failed to emit the matching `change_recurrence`
+        # (rule 11 in the system prompt — models sometimes skip it), synthesize
+        # one here so the plan the owner sees actually reflects the guidance.
+        # Only fires when an issue cites the snippet, so it remains RAG-grounded.
+        from care_advisor import ProposedChange as _PC  # local import avoids cycle
+        already_changed = {
+            (c.task_name, c.pet_name)
+            for c in proposed_changes
+            if c.change_type == "change_recurrence"
+        }
+        for issue in review.issues:
+            key = (issue.task_name, issue.pet_name)
+            if key in already_changed:
+                continue
+            target = next(
+                (
+                    t for t in plan
+                    if t.name == issue.task_name
+                    and t.pet_name == issue.pet_name
+                    and (t.category or "").lower() == "feeding"
+                    and (t.recurrence or "").lower() != "daily"
+                ),
+                None,
+            )
+            if target is None:
+                continue
+            task_idx = next(
+                (i + 1 for i, t in enumerate(plan) if t is target), None
+            )
+            proposed_changes.append(_PC(
+                pet_name=issue.pet_name,
+                task_name=issue.task_name,
+                change_type="change_recurrence",
+                reason=f"Synthesized from advisor issue: {issue.recommendation}",
+                task_index=task_idx,
+                new_recurrence="daily",
+                citations=list(issue.citations),
+            ))
+            already_changed.add(key)
+            logger.info(
+                "Synthesized change_recurrence=daily for %s/%s (advisor "
+                "raised issue but emitted no fix)",
+                issue.task_name, issue.pet_name,
+            )
+
+        if not proposed_changes:
             return plan, []
 
         new_plan = list(plan)
@@ -316,7 +367,7 @@ class Scheduler:
             (t.category or "").lower() == "feeding" for t in plan
         )
 
-        for change in review.proposed_changes:
+        for change in proposed_changes:
             # Reject changes whose reason describes a split / new session.
             # Our scheduler has no add-task operation; the model has
             # repeatedly tried to fake one by emitting a shorten with
