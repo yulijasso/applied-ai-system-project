@@ -398,15 +398,11 @@ if generate_clicked:
                 if other_issues:
                     st.markdown("**Other concerns**")
                     for item in other_issues:
-                        icon = {"high": "🚨", "medium": "⚠️", "low": "💡"}.get(
-                            item.severity, "•"
-                        )
                         sources = (
                             ", ".join(f"`{c}`" for c in item.citations) or "—"
                         )
                         st.markdown(
-                            f"{icon} **[{item.severity.upper()}] "
-                            f"{item.task_name} — {item.pet_name}**  \n"
+                            f"**{item.task_name} — {item.pet_name}**  \n"
                             f"{item.issue}  \n"
                             f"_Recommendation:_ {item.recommendation}  \n"
                             f"_Sources:_ {sources}"
