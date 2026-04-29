@@ -258,6 +258,10 @@ class Scheduler:
         return descs
 
     def _describe_plan(self, plan: List[Task]) -> List[str]:
+        # Render recurrence in a way the LLM can't misread. The earlier wording
+        # "weekly recurring" was being parsed by the model as scheduling
+        # metadata instead of meaning "this task fires once per week" — so a
+        # cat scheduled to Feed weekly was getting only a low-severity nudge.
         lines = []
         for task in plan:
             time_str = (
@@ -266,7 +270,14 @@ class Scheduler:
                 if task.scheduled_time is not None
                 else "unscheduled"
             )
-            recur = f", {task.recurrence} recurring" if task.is_recurring else ""
+            if task.recurrence == "daily":
+                recur = ", recurs DAILY"
+            elif task.recurrence == "weekly":
+                recur = ", recurs ONCE EVERY 7 DAYS (not daily)"
+            elif task.recurrence:
+                recur = f", recurs {task.recurrence}"
+            else:
+                recur = ", no recurrence"
             lines.append(
                 f"{time_str}: '{task.name}' for {task.pet_name}, "
                 f"{task.duration} min, {task.priority.name} priority, "
@@ -301,6 +312,10 @@ class Scheduler:
         new_plan = list(plan)
         applied: List["ProposedChange"] = []
 
+        plan_has_feeding = any(
+            (t.category or "").lower() == "feeding" for t in plan
+        )
+
         for change in review.proposed_changes:
             # Reject changes whose reason describes a split / new session.
             # Our scheduler has no add-task operation; the model has
@@ -312,6 +327,25 @@ class Scheduler:
                 logger.info(
                     "Advisor change skipped (split/add-session pattern in "
                     "reason — system cannot add tasks): %s for %s — %r",
+                    change.task_name,
+                    change.pet_name,
+                    change.reason,
+                )
+                continue
+
+            # Reject reschedule edits that try to align a medication with
+            # an unstated meal time. If the plan has no feeding task, the
+            # model has no basis for picking a "with food" time; surfacing
+            # the warning in the issue text is fine but mutating the plan
+            # to a fabricated mealtime is a hallucination.
+            if (
+                change.change_type == "reschedule"
+                and not plan_has_feeding
+                and self._reason_describes_meal_alignment(change.reason)
+            ):
+                logger.info(
+                    "Advisor change skipped (reschedule references meal but "
+                    "plan has no feeding task): %s for %s — %r",
                     change.task_name,
                     change.pet_name,
                     change.reason,
@@ -388,6 +422,16 @@ class Scheduler:
                         task, scheduled_time=new_start
                     )
                     applied.append(change)
+            elif change.change_type == "change_recurrence":
+                new_rec = self._normalize_recurrence(change.new_recurrence)
+                if new_rec != task.recurrence:
+                    new_plan[idx] = dataclasses.replace(task, recurrence=new_rec)
+                    applied.append(change)
+                else:
+                    logger.info(
+                        "Advisor change skipped (recurrence already %r): %s for %s",
+                        new_rec, change.task_name, change.pet_name,
+                    )
             else:
                 logger.warning(
                     "Unknown advisor change_type '%s' — skipped",
@@ -429,6 +473,32 @@ class Scheduler:
         lowered = reason.lower()
         return any(phrase in lowered for phrase in cls._SPLIT_REASON_PHRASES)
 
+    _MEAL_ALIGNMENT_PHRASES = (
+        "with food",
+        "with a meal",
+        "with meal",
+        "at mealtime",
+        "with breakfast",
+        "with dinner",
+        "alongside meal",
+        "alongside food",
+        "after eating",
+        "during breakfast",
+        "during dinner",
+        "align with mealtime",
+        "align with a meal",
+        "align with the meal",
+        "given with food",
+        "taken with food",
+    )
+
+    @classmethod
+    def _reason_describes_meal_alignment(cls, reason: Optional[str]) -> bool:
+        if not reason:
+            return False
+        lowered = reason.lower()
+        return any(phrase in lowered for phrase in cls._MEAL_ALIGNMENT_PHRASES)
+
     @staticmethod
     def _resolve_target(
         plan: List[Task], change: "ProposedChange"
@@ -463,6 +533,20 @@ class Scheduler:
             ),
             None,
         )
+
+    @staticmethod
+    def _normalize_recurrence(value: Optional[str]) -> Optional[str]:
+        """Map a model-emitted recurrence string to the value the Task field
+        expects. 'none', empty string, and None all map to None (no recurrence).
+        Unknown values are dropped (returned as the original task's value)."""
+        if value is None:
+            return None
+        v = str(value).strip().lower()
+        if v in ("daily", "weekly"):
+            return v
+        if v in ("none", "no", ""):
+            return None
+        return None
 
     @staticmethod
     def _parse_hhmm(hhmm: Optional[str]) -> Optional[int]:

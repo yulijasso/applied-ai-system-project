@@ -193,6 +193,10 @@ def _format_change(c, draft_lookup):
             else "—"
         )
         return f"{old_t} → {c.new_start_hhmm}"
+    if c.change_type == "change_recurrence" and old:
+        old_rec = old.recurrence or "none"
+        new_rec = (c.new_recurrence or "none").lower()
+        return f"recurrence: {old_rec} → {new_rec}"
     return c.change_type
 
 
