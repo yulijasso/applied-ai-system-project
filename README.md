@@ -69,19 +69,19 @@ The first run embeds the 12 knowledge snippets and persists them to `knowledge/.
 
 Three live-capture screenshots showing the owner's input, the rule-based plan, and the advisor's response. Each demonstrates a different primary outcome the system can produce.
 
-### 1. In-range plan — advisor stays its hand
+### 1. In-range plan — advisor stays its hand (HAPPY PATH)
 
 
 
 ![Scenario 1 — in-range Toy Poodle plan](assets/Scenario%201.jpeg)
 
-### 2. Over-target plan — high-severity concern surfaced
+### 2.
 
 
 
 ![Scenario 2 — over-target Bulldog plan](assets/Scenario%202.jpeg)
 
-### 3. Under-target plan — `lengthen` edit applied
+### 3. 
 
 
 ![Scenario 3 — under-target high-energy breed](assets/Scenario%203.jpeg)
