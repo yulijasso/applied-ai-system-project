@@ -71,19 +71,18 @@ Three live-capture screenshots showing the owner's input, the rule-based plan, a
 
 ### 1. In-range plan — advisor stays its hand
 
-In-range Toy Poodle plan: Mochi, 1 year old, 20-min Morning walk. Advisor classifies the breed into the low-energy bucket (20–30 min/day), confirms the plan is within range, and returns no edits.
+
 
 ![Scenario 1 — in-range Toy Poodle plan](assets/Scenario%201.jpeg)
 
 ### 2. Over-target plan — high-severity concern surfaced
 
-Over-target Bulldog plan: Toby, 2 years old, two Morning walks totaling 70 min. Advisor flags the total as exceeding the 20–30 min/day target for brachycephalic breeds and surfaces a HIGH-severity concern with a citation to `dog_exercise_needs`. The Evaluator's split-pattern guard prevents the model from "fixing" it via fake task splits, so the owner makes the call manually.
+
 
 ![Scenario 2 — over-target Bulldog plan](assets/Scenario%202.jpeg)
 
 ### 3. Under-target plan — `lengthen` edit applied
 
-Under-target German Shorthaired Pointer plan: Yogi, 1 year old, 20-min Morning walk. Advisor classifies the breed into the high-energy bucket (60–120 min/day), emits a structured `lengthen` edit, and the Evaluator applies it. The plan table renders the 🤖 Morning walk row at 60 min and the diff table cites `dog_exercise_needs`.
 
 ![Scenario 3 — under-target high-energy breed](assets/Scenario%203.jpeg)
 
