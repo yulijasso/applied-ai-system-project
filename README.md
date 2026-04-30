@@ -67,123 +67,25 @@ The first run embeds the 12 knowledge snippets and persists them to `knowledge/.
 
 ## Sample interactions
 
-Each example shows the owner's input → what the rule-based scheduler produced → what the advisor said → what was applied.
+Three live-capture screenshots showing the owner's input, the rule-based plan, and the advisor's response. Each demonstrates a different primary outcome the system can produce.
 
-### 1. End-to-end walkthrough — Toy Poodle with an in-range plan (live capture)
+### 1. In-range plan — advisor stays its hand
 
-**Owner setup**
-- Owner name: **Yuliana**
-- Available time per day: **120 min**
+In-range Toy Poodle plan: Mochi, 1 year old, 20-min Morning walk. Advisor classifies the breed into the low-energy bucket (20–30 min/day), confirms the plan is within range, and returns no edits.
 
-**Pet setup**
-- Name: **Mochi** · Species: **dog** · Breed: **Toy Poodle** · Age: **1 year**
+![Scenario 1 — in-range Toy Poodle plan](assets/Scenario%201.jpeg)
 
-**Task added**
-- Title: **Morning walk** · Duration: **20 min** · Priority: **HIGH** · Category: **walk** · Recurrence: none
+### 2. Over-target plan — high-severity concern surfaced
 
-**After clicking _Generate schedule_:**
+Over-target Bulldog plan: Toby, 2 years old, two Morning walks totaling 70 min. Advisor flags the total as exceeding the 20–30 min/day target for brachycephalic breeds and surfaces a HIGH-severity concern with a citation to `dog_exercise_needs`. The Evaluator's split-pattern guard prevents the model from "fixing" it via fake task splits, so the owner makes the call manually.
 
-> Ready to schedule **1** open task(s) across **1** pet(s), within **120 min** today.
->
-> ✅ **Connected — Gemini · 12-doc knowledge base**
->
-> **Daily plan for Yuliana — 20/120 min used**
->
-> | # | Time | Task | Pet | Min | Priority | Recurrence |
-> |---|------|------|-----|-----|----------|------------|
-> | 1 | — | Morning walk | Mochi | 20 | HIGH | — |
+![Scenario 2 — over-target Bulldog plan](assets/Scenario%202.jpeg)
 
-**🤖 AI care advisor**
+### 3. Under-target plan — `lengthen` edit applied
 
-> The plan provides adequate exercise for Mochi, a 1-year-old Toy Poodle, with a 20-minute walk, which is within the recommended daily target of 20–30 minutes for low-energy breeds.
->
-> ✅ Plan looks fine against retrieved guidance.
->
-> _Retrieved: `dog_exercise_needs`, `puppy_kitten_care`, `senior_pet_care` · 9396 ms_
+Under-target German Shorthaired Pointer plan: Yogi, 1 year old, 20-min Morning walk. Advisor classifies the breed into the high-energy bucket (60–120 min/day), emits a structured `lengthen` edit, and the Evaluator applies it. The plan table renders the 🤖 Morning walk row at 60 min and the diff table cites `dog_exercise_needs`.
 
-**What this demonstrates:** the advisor correctly classified Mochi (Toy Poodle → low-energy bucket, 20–30 min/day), saw that 20 min sits inside that range, and returned an empty `proposed_changes` list. This is the happy-path proof that the system stays its hand when nothing needs fixing.
-
-### 2. Over-target Bulldog plan — high-severity concern surfaced (live capture)
-
-**Owner setup**
-- Owner name: **Yuliana**
-- Available time per day: **200 min**
-
-**Pet setup**
-- Name: **Toby** · Species: **dog** · Breed: **Bulldog** · Age: **2 years**
-
-**Tasks added**
-- Morning walk · 20 min · HIGH · walk · no recurrence
-- Morning walk · 50 min · HIGH · walk · no recurrence
-- *Total daily exercise: 70 min*
-
-**After clicking _Generate schedule_:**
-
-> Ready to schedule **2** open task(s) across **1** pet(s), within **200 min** today.
->
-> ✅ **Connected — Gemini · 12-doc knowledge base**
->
-> **Daily plan for Yuliana — 70/200 min used**
->
-> 🚨 **1 high-severity concern(s)** — see the AI section below before following the plan.
->
-> | # | Time | Task | Pet | Min | Priority | Recurrence |
-> |---|------|------|-----|-----|----------|------------|
-> | 1 | — | Morning walk | Toby | 20 | HIGH | — |
-> | 2 | — | Morning walk | Toby | 50 | HIGH | — |
-
-**🤖 AI care advisor**
-
-> Other concerns
->
-> 🚨 **[HIGH] Morning walk — Toby**
-> The total daily exercise planned for Toby, a 2-year-old Bulldog, is 70 minutes (20 min + 50 min), which significantly exceeds the typical target of 20–30 minutes/day for low-energy or brachycephalic breeds. Bulldogs are brachycephalic and cool inefficiently, making excessive exercise a health risk.
->
-> _Recommendation:_ The daily exercise for Toby should be reduced to be within the 20–30 minute range, ideally split into shorter walks.
->
-> _Sources:_ `dog_exercise_needs`
->
-> _Retrieved: `dog_exercise_needs`, `heat_safety_walking`, `puppy_kitten_care` · 12725 ms_
-
-**What this demonstrates:** the advisor correctly identified the over-target total (70 min vs 20–30 min target for a Bulldog), classified Toby's breed properly (low-energy / brachycephalic), and surfaced a high-severity concern with citations to `dog_exercise_needs`. The plan table renders the high-severity banner at the top so the owner can't miss it. The advisor's recommendation mentions splitting into shorter walks — any structured edit emitted with that rationale would be caught by the Evaluator's split-pattern guard, so the plan stays at 70 min and the owner is asked to make the call manually rather than have a half-fix silently applied. Two layers of safety: snippet-grounded reasoning surfaces the issue, and the Evaluator prevents the AI from "fixing" it in a way the system can't actually express.
-
-### 3. Under-target high-energy breed — `lengthen` edit applied (live capture)
-
-**Owner setup**
-- Owner name: **Yuliana**
-- Available time per day: **120 min**
-
-**Pet setup**
-- Name: **Yogi** · Species: **dog** · Breed: **German Shorthaired Pointer** · Age: **1 year**
-
-**Task added**
-- Morning walk · 20 min · HIGH · walk · no recurrence
-
-**After clicking _Generate schedule_:**
-
-> Ready to schedule **1** open task(s) across **1** pet(s), within **120 min** today.
->
-> ✅ **Connected — Gemini · 12-doc knowledge base**
->
-> **Daily plan for Yuliana — 60/120 min used  ·  🤖 1 AI edit(s)**
->
-> | # | Time | Task | Pet | Min | Priority | Recurrence |
-> |---|------|------|-----|-----|----------|------------|
-> | 1 | — | 🤖 Morning walk | Yogi | **60** | HIGH | — |
-
-**🤖 AI care advisor**
-
-> The plan for Yogi provides insufficient exercise for a high-energy adult German Shorthaired Pointer. The 'Morning walk' has been lengthened to 60 minutes to meet the minimum daily exercise target.
->
-> **Edits applied to the plan**
->
-> | Task | Change | Reason | Sources |
-> |------|--------|--------|---------|
-> | Morning walk (Yogi) | 20 min → 60 min | To meet the minimum daily exercise requirement of 60–120 minutes for a high-energy adult German Shorthaired Pointer; the current 20-minute walk is insufficient and can lead to behavioral issues. | `dog_exercise_needs` |
->
-> _Retrieved: `dog_exercise_needs`, `puppy_kitten_care`, `heat_safety_walking` · 11776 ms_
-
-**What this demonstrates:** the advisor correctly classified Yogi (German Shorthaired Pointer → high-energy working/sporting bucket, 60–120 min/day), recognized the planned 20-min walk as below the lower bound of the bucket's range, and emitted a structured `lengthen` edit (`new_duration_min: 60`) with a snippet-grounded reason. The Evaluator validated the edit (matching task index, no split-pattern phrasing, real duration change) and applied it to the plan via `dataclasses.replace`. The plan table now shows the **🤖 Morning walk · 60 min** row, the headline reflects the new total (60/120 min used · 🤖 1 AI edit), and the diff table cites `dog_exercise_needs`. This is the third edit type in action — paired with Example 1 (in-range = no edit) and Example 2 (over-target high-severity surfaced), Examples 1–3 cover the three primary outcomes the system can produce.
+![Scenario 3 — under-target high-energy breed](assets/Scenario%203.jpeg)
 
 
 ## Design decisions
